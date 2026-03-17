@@ -4,9 +4,10 @@ MCP tools for external economic intelligence.
 Tools exposed to the Supervisor Agent:
   - get_inflation            : Latest CPI inflation for any country (World Bank API)
   - get_macro_indicators     : CPI, GDP growth, interest rate, unemployment (World Bank API)
-  - analyze_economic_webpage : Fetch a webpage + analyse it using Claude_for_Analysis
+  - analyze_economic_webpage : Fetch a webpage + analyse it using Foundation Model API
   - list_abs_dataflows       : List available ABS SDMX dataflows
   - get_abs_data             : Fetch time-series data from the ABS SDMX REST API
+  - web_search               : Search the web for economic data and news (DuckDuckGo)
 """
 
 import httpx
@@ -143,8 +144,8 @@ DEFAULT_INDICATORS: dict[str, str] = {
     "SL.UEM.TOTL.ZS":   "Unemployment, total (% of labour force)",
 }
 
-# Databricks Model Serving endpoint for Claude
-CLAUDE_ENDPOINT = "Claude_for_Analysis"
+# Databricks Foundation Model API endpoint
+CLAUDE_ENDPOINT = "databricks-claude-sonnet-4-6"
 
 
 def load_tools(mcp_server) -> None:
@@ -329,12 +330,11 @@ def load_tools(mcp_server) -> None:
         except Exception as e:
             return f"Failed to fetch {url}: {e}"
 
-        # 2. Call Claude_for_Analysis via Databricks SDK (handles auth automatically)
+        # 2. Call Foundation Model API via REST
         try:
             w = utils.get_user_authenticated_workspace_client()
-            response = w.serving_endpoints.query(
-                name=CLAUDE_ENDPOINT,
-                messages=[
+            payload = {
+                "messages": [
                     {
                         "role": "system",
                         "content": (
@@ -352,11 +352,16 @@ def load_tools(mcp_server) -> None:
                         ),
                     },
                 ],
-                max_tokens=500,
+                "max_tokens": 500,
+            }
+            resp = w.api_client.do(
+                "POST",
+                f"/serving-endpoints/{CLAUDE_ENDPOINT}/invocations",
+                body=payload,
             )
-            return response.choices[0].message.content
+            return resp["choices"][0]["message"]["content"]
         except Exception as e:
-            return f"Claude_for_Analysis call failed: {e}"
+            return f"Model call failed: {e}"
 
     # ── 5. List ABS dataflows ──────────────────────────────────────────────────
 
@@ -476,3 +481,75 @@ def load_tools(mcp_server) -> None:
             }
         except Exception as e:
             return {"dataflow": dataflow.upper(), "error": str(e)}
+
+    # ── 7. Web search (DuckDuckGo HTML) ─────────────────────────────────────
+
+    @mcp_server.tool
+    def web_search(
+        query: str,
+        max_results: int = 5,
+        region: str = "wt-wt",
+        time_range: str | None = None,
+    ) -> list[dict]:
+        """
+        Search the web for economic data, news, reports, or any topic using DuckDuckGo.
+
+        Use this tool when you need to find recent information, news articles,
+        or data sources that are not available through the other specialised tools.
+
+        Args:
+            query:       Search query — e.g. 'Australia inflation rate 2026',
+                         'RBA interest rate decision March 2026'.
+            max_results: Number of results to return (default 5, max 20).
+            region:      Region code for results — e.g. 'au-en' (Australia),
+                         'us-en' (US), 'uk-en' (UK), 'wt-wt' (global, default).
+            time_range:  Filter by recency — 'd' (past day), 'w' (past week),
+                         'm' (past month), 'y' (past year), or None (all time).
+
+        Returns:
+            List of dicts with keys: title, href, body (snippet).
+        """
+        import re
+
+        try:
+            params = {"q": query, "kl": region}
+            if time_range:
+                params["df"] = time_range
+
+            with httpx.Client(timeout=15, follow_redirects=True) as client:
+                resp = client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params=params,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                      "Chrome/120.0.0.0 Safari/537.36",
+                    },
+                )
+                resp.raise_for_status()
+                html = resp.text
+
+            results = []
+            # Parse result blocks from DuckDuckGo HTML
+            blocks = re.findall(
+                r'<a rel="nofollow" class="result__a" href="([^"]*)"[^>]*>(.*?)</a>'
+                r'.*?<a class="result__snippet"[^>]*>(.*?)</a>',
+                html,
+                re.DOTALL,
+            )
+            for href, title, body in blocks[:min(max_results, 20)]:
+                # Clean HTML tags from title and body
+                clean = lambda s: re.sub(r"<[^>]+>", "", s).strip()
+                # Decode DuckDuckGo redirect URL
+                from urllib.parse import unquote, parse_qs, urlparse
+                parsed = urlparse(href)
+                actual_url = parse_qs(parsed.query).get("uddg", [href])[0]
+                results.append({
+                    "title": clean(title),
+                    "href": unquote(actual_url),
+                    "body": clean(body),
+                })
+
+            return results if results else [{"message": "No results found", "query": query}]
+        except Exception as e:
+            return [{"error": str(e), "query": query}]

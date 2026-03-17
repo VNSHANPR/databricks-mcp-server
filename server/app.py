@@ -30,8 +30,8 @@ STATIC_DIR = Path(__file__).parent / "../static"
 # Register all tools
 load_tools(mcp_server)
 
-# Streamable HTTP app (MCP protocol over HTTP)
-mcp_app = mcp_server.http_app()
+# Streamable HTTP transport (required for Databricks Supervisor Agent / Genie Code)
+mcp_app = mcp_server.http_app(path="/mcp", transport="streamable-http")
 
 # ── FastAPI app ─────────────────────────────────────────────────────────────────
 app = FastAPI(

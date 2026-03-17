@@ -13,22 +13,23 @@ def get_workspace_client() -> WorkspaceClient:
 
 def get_user_authenticated_workspace_client() -> WorkspaceClient:
     """
-    Return a workspace client authenticated as the end user.
+    Return an authenticated workspace client.
 
-    In a Databricks App, the platform injects the user's OAuth token via the
-    x-forwarded-access-token header. Locally, falls back to default auth.
+    Auth resolution order:
+      1. Interactive user session (browser): uses x-forwarded-access-token injected
+         by the Databricks Apps proxy — acts on behalf of the end user.
+      2. Agent / M2M call (Supervisor Agent via UC connection): no forwarded token
+         is present, so falls back to the app's own service principal credentials,
+         which the Databricks Apps runtime injects automatically via environment
+         variables (DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET).
+      3. Local development: uses default SDK auth (~/.databrickscfg or env vars).
     """
-    is_databricks_app = "DATABRICKS_APP_NAME" in os.environ
-
-    if not is_databricks_app:
-        return WorkspaceClient()
-
     headers = header_store.get({})
     token = headers.get("x-forwarded-access-token")
 
-    if not token:
-        raise ValueError(
-            "Authentication token not found in request headers (x-forwarded-access-token)."
-        )
+    if token:
+        # Interactive user session — act on behalf of the user
+        return WorkspaceClient(token=token, auth_type="pat")
 
-    return WorkspaceClient(token=token, auth_type="pat")
+    # Agent/M2M call or local dev — use app SP credentials (auto-injected by runtime)
+    return WorkspaceClient()
